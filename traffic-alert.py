@@ -1,13 +1,18 @@
 #!/usr/bin/python3
-import googlemaps, requests, os, logging, sys
+import googlemaps, requests, os, logging, sys, pytz
 from tinydb import TinyDB, Query
-from datetime import date
+from datetime import date, datetime
 
 # Init variables and load from env var
 API_KEY = os.environ.get('API_KEY')
 DATA_DIR = os.environ.get('DATA_DIR')
-today = str(date.today())
+london_timezone = pytz.timezone("Europe/London")
+theDate = date.today()
+today = str(theDate)
+weekday = theDate.weekday()
+timestamp = datetime.now(london_timezone)
 stateDB = TinyDB(DATA_DIR+'state.json')
+dataDB = TinyDB(DATA_DIR+'data.json')
 url = 'https://ntfy.sh/towcestera5alerts'
 gmaps = googlemaps.Client(key=API_KEY)
 racecourse = (52.122191, -0.973226)
@@ -41,6 +46,9 @@ time = result["rows"][0]["elements"][0]["duration_in_traffic"]["value"]
 trafficText = result["rows"][0]["elements"][0]["duration_in_traffic"]["text"]
 baseline = result["rows"][0]["elements"][0]["duration"]["value"]
 traffic = time-baseline
+
+# Saving the duration for future work
+dataDB.insert({'duration': time, 'date': str(timestamp), 'day': weekday})
 
 logging.info('Difference is %s, TrafficTime is %s, Baseline is %s', str(traffic), str(time), str(baseline))
 
