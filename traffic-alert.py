@@ -17,6 +17,7 @@ url = 'https://ntfy.sh/towcestera5alerts'
 gmaps = googlemaps.Client(key=API_KEY)
 racecourse = (52.122191, -0.973226)
 stonyRoundabout = (52.066852, -0.871330)
+distance_threshold = 9400
 
 # Init the logger
 file_handler = logging.FileHandler(filename=DATA_DIR+'log')
@@ -45,34 +46,43 @@ result = gmaps.distance_matrix(racecourse, stonyRoundabout, departure_time="now"
 time = result["rows"][0]["elements"][0]["duration_in_traffic"]["value"]
 trafficText = result["rows"][0]["elements"][0]["duration_in_traffic"]["text"]
 baseline = result["rows"][0]["elements"][0]["duration"]["value"]
+distance = result["rows"][0]["elements"][0]["distance"]["value"]
+status = result["rows"][0]["elements"][0]["status"]
+status2 = result["status"]
 traffic = time-baseline
 
 # Saving the duration for future work
 dataDB.insert({'duration': time, 'date': str(timestamp), 'day': weekday})
 
-logging.info('Difference is %s, TrafficTime is %s, Baseline is %s', str(traffic), str(time), str(baseline))
+logging.info('Difference is %s, TrafficTime is %s, Baseline is %s, distance is %s, status is %s, overalstatus is %s', str(traffic), str(time), str(baseline), str(distance), status, status2)
 
 # If the Traffic is more than 10 mins
-if traffic >= 600:
+if distance > distance_threshold:
+    if state < 3:
+        logging.info('Traffic is terrible: %s', trafficText)
+        stateDB.update({'state': 3}, State.date == today)
+        x = requests.post(url, "Heavy traffic means A5 is no longer viable\nTravel time is currently: "+trafficText, headers={"Title": "Traffic is terrible", "Tags": "rotating_light,construction"})
+        quit()
+elif (traffic >= 600) and (distance <= distance_threshold):
     if state < 2:
         logging.info('Traffic is bad: %s', trafficText)
         stateDB.update({'state': 2}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is bad!", "Tags": "rotating_light,construction"})
+        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is bad!", "Tags": "rotating_light"})
         quit()
-elif traffic >= 300:
-    if state > 1:
+elif (traffic >= 300) and (distance <= distance_threshold):
+    if (state > 1) and (traffic < 500):
         logging.info('Traffic is calming: %s', trafficText)
         stateDB.update({'state': 1}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is calming", "Tags": "rotating_light,face_exhaling"})
+        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is calming", "Tags": "face_exhaling"})
         quit()
     if state < 1:
         logging.info('Traffic is building: %s', trafficText)
         stateDB.update({'state': 1}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is building", "Tags": "rotating_light,face_exhaling"})
+        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is building", "Tags": "blue_car"})
         quit()
-elif traffic < 300:
+elif (traffic < 300) and (distance <= distance_threshold):
     if state > 0:
         logging.info('Traffic is normal: %s', trafficText)
         stateDB.update({'state': 0}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is back to normal", "Tags": "relieved"})
+        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is back to normal", "Tags": "white_check_mark"})
         quit()
