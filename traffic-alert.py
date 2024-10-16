@@ -16,8 +16,9 @@ dataDB = TinyDB(DATA_DIR+'data.json')
 url = 'https://ntfy.sh/towcestera5alerts'
 gmaps = googlemaps.Client(key=API_KEY)
 racecourse = (52.122191, -0.973226)
+newroundabout = (52.11732206783605, -0.9637802399721431)
 stonyRoundabout = (52.066852, -0.871330)
-distance_threshold = 9400
+distance_threshold = 8500
 
 # Init the logger
 file_handler = logging.FileHandler(filename=DATA_DIR+'log')
@@ -41,7 +42,7 @@ if state == []:
     state = 0
 
 # Main run
-result = gmaps.distance_matrix(racecourse, stonyRoundabout, departure_time="now")
+result = gmaps.distance_matrix(newroundabout, stonyRoundabout, departure_time="now")
 
 time = result["rows"][0]["elements"][0]["duration_in_traffic"]["value"]
 trafficText = result["rows"][0]["elements"][0]["duration_in_traffic"]["text"]
