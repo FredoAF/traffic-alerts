@@ -20,7 +20,7 @@ racecourse2 = (52.122268, -0.973021)
 newroundabout = (52.11732206783605, -0.9637802399721431)
 stony2 = (52.066852, -0.8714004)
 stonyRoundabout = (52.066852, -0.871330)
-distance_threshold = 9400
+distance_threshold = 9800
 
 # Init the logger
 file_handler = logging.FileHandler(filename=DATA_DIR+'log')
@@ -58,7 +58,6 @@ traffic = time-baseline
 dataDB.insert({'duration': time, 'date': str(timestamp), 'day': weekday})
 
 logging.info('Difference is %s, TrafficTime is %s, Baseline is %s, distance is %s, status is %s, overalstatus is %s', str(traffic), str(time), str(baseline), str(distance), status, status2)
-
 # If the Traffic is more than 10 mins
 if distance > distance_threshold:
     if state < 3:

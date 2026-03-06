@@ -7,5 +7,5 @@ docker push ghcr.io/fredoaf/traffic-alerts:$VERSION
 
 API_KEY=$(cat key)
 
-docker run --rm -it -v $PWD:/app -e API_KEY=$API_KEY \
+docker run --rm -it -e API_KEY=$API_KEY --entrypoint /bin/ash\
   -e DATA_DIR='./' -w /app ghcr.io/fredoaf/traffic-alerts:$VERSION
