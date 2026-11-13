@@ -1,11 +1,11 @@
 #!/bin/bash
+# Local smoke test only. Publishing is done by GitHub Actions (.github/workflows/docker-build.yml).
+# Expects Redis on localhost, e.g. kubectl -n redis port-forward svc/redis-service 6379
 
-VERSION=$(cat VERSION)
-
-docker build . -t ghcr.io/fredoaf/traffic-alerts:$VERSION
-docker push ghcr.io/fredoaf/traffic-alerts:$VERSION
-
+set -e
 API_KEY=$(cat key)
 
-docker run --rm -it -e API_KEY=$API_KEY --entrypoint /bin/ash\
-  -e DATA_DIR='./' -w /app ghcr.io/fredoaf/traffic-alerts:$VERSION
+docker build . -t traffic-alerts:dev
+
+docker run --rm -it --network host -e API_KEY=$API_KEY -e REDIS_HOST=localhost \
+  --entrypoint /bin/ash traffic-alerts:dev

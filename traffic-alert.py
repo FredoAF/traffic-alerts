@@ -1,90 +1,146 @@
 #!/usr/bin/python3
-import googlemaps, requests, os, logging, sys, pytz
-from tinydb import TinyDB, Query
-from datetime import date, datetime
+"""Check A5 travel time (Towcester -> Stony Stratford) via Google, record it in Redis,
+and send an ntfy notification only when traffic gets genuinely bad.
 
-# Init variables and load from env var
-API_KEY = os.environ.get('API_KEY')
-DATA_DIR = os.environ.get('DATA_DIR')
-london_timezone = pytz.timezone("Europe/London")
-theDate = date.today()
-today = str(theDate)
-weekday = theDate.weekday()
-timestamp = datetime.now(london_timezone)
-stateDB = TinyDB(DATA_DIR+'state.json')
-dataDB = TinyDB(DATA_DIR+'data.json')
-url = 'https://ntfy.sh/towcestera5alerts'
-gmaps = googlemaps.Client(key=API_KEY)
-racecourse = (52.122191, -0.973226)
-racecourse2 = (52.122268, -0.973021)
-newroundabout = (52.11732206783605, -0.9637802399721431)
-stony2 = (52.066852, -0.8714004)
-stonyRoundabout = (52.066852, -0.871330)
-distance_threshold = 9800
+Redis keys
+  traffic_stats   stream  one entry per run: duration, baseline, delay, distance, day
+  traffic_latest  hash    most recent reading, for Grafana stat panels
+  traffic_alert   hash    alert state machine (level, pending, streak); expires at midnight
+  traffic_alerts  stream  one entry per notification sent
+"""
+import logging
+import os
+import sys
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-# Init the logger
-file_handler = logging.FileHandler(filename=DATA_DIR+'log')
-stdout_handler = logging.StreamHandler(stream=sys.stdout)
-handlers = [file_handler, stdout_handler]
-logging.basicConfig(handlers=handlers,
-                    format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                    datefmt='%H:%M:%S',
-                    level=logging.INFO)
+import googlemaps
+import redis
+import requests
 
-# Init the DB
-State = Query()
-state = stateDB.search(State.date == today)
-if state:
-    state = state[0]['state']
-if state == []:
-    # print('its a new day')
-    logging.info('Its a new day, state is %s', state)
-    stateDB.truncate()
-    stateDB.insert({'state': 0, 'date': today})
-    state = 0
+# --- Config ---
+API_KEY = os.environ["API_KEY"]
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh/towcestera5alerts")
 
-# Main run
-result = gmaps.distance_matrix(racecourse2, stony2, departure_time="now")
+# Delay (seconds over the free-flow time) that counts as bad traffic.
+BAD_DELAY = int(os.environ.get("BAD_DELAY", "600"))
+# Delay below which an alert is considered cleared. Gap between the two stops flapping.
+CLEAR_DELAY = int(os.environ.get("CLEAR_DELAY", "300"))
+# Route longer than this means Google has routed us off the A5 entirely.
+DISTANCE_THRESHOLD = int(os.environ.get("DISTANCE_THRESHOLD", "9800"))
+# Consecutive readings needed before a state change is believed.
+CONFIRM_RUNS = int(os.environ.get("CONFIRM_RUNS", "2"))
+# Send a "back to normal" message when an alert clears.
+NOTIFY_CLEAR = os.environ.get("NOTIFY_CLEAR", "0") == "1"
 
-time = result["rows"][0]["elements"][0]["duration_in_traffic"]["value"]
-trafficText = result["rows"][0]["elements"][0]["duration_in_traffic"]["text"]
-baseline = result["rows"][0]["elements"][0]["duration"]["value"]
-distance = result["rows"][0]["elements"][0]["distance"]["value"]
-status = result["rows"][0]["elements"][0]["status"]
-status2 = result["status"]
-traffic = time-baseline
+ORIGIN = (52.122268, -0.973021)   # Towcester racecourse
+DEST = (52.066852, -0.8714004)    # Stony Stratford
 
-# Saving the duration for future work
-dataDB.insert({'duration': time, 'date': str(timestamp), 'day': weekday})
+LEVEL_NORMAL, LEVEL_BAD, LEVEL_TERRIBLE = 0, 2, 3
+LEVEL_NAMES = {LEVEL_NORMAL: "normal", LEVEL_BAD: "bad", LEVEL_TERRIBLE: "terrible"}
 
-logging.info('Difference is %s, TrafficTime is %s, Baseline is %s, distance is %s, status is %s, overalstatus is %s', str(traffic), str(time), str(baseline), str(distance), status, status2)
-# If the Traffic is more than 10 mins
-if distance > distance_threshold:
-    if state < 3:
-        logging.info('Traffic is terrible: %s', trafficText)
-        stateDB.update({'state': 3}, State.date == today)
-        x = requests.post(url, "Heavy traffic means A5 is no longer viable\nTravel time is currently: "+trafficText, headers={"Title": "Traffic is terrible", "Tags": "rotating_light,construction"})
-        quit()
-elif (traffic >= 600) and (distance <= distance_threshold):
-    if state < 2:
-        logging.info('Traffic is bad: %s', trafficText)
-        stateDB.update({'state': 2}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is bad!", "Tags": "rotating_light"})
-        quit()
-elif (traffic >= 300) and (distance <= distance_threshold):
-    if (state > 1) and (traffic < 500):
-        logging.info('Traffic is calming: %s', trafficText)
-        stateDB.update({'state': 1}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is calming", "Tags": "face_exhaling"})
-        quit()
-    if state < 1:
-        logging.info('Traffic is building: %s', trafficText)
-        stateDB.update({'state': 1}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is building", "Tags": "blue_car"})
-        quit()
-elif (traffic < 300) and (distance <= distance_threshold):
-    if state > 0:
-        logging.info('Traffic is normal: %s', trafficText)
-        stateDB.update({'state': 0}, State.date == today)
-        x = requests.post(url, "Travel time is currently: "+trafficText, headers={"Title": "Traffic is back to normal", "Tags": "white_check_mark"})
-        quit()
+LONDON = ZoneInfo("Europe/London")
+
+logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("traffic")
+
+
+def midnight_tonight(now):
+    return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def classify(delay, distance):
+    """Map a reading to a level, or None when it sits in the hysteresis band."""
+    if distance > DISTANCE_THRESHOLD:
+        return LEVEL_TERRIBLE
+    if delay >= BAD_DELAY:
+        return LEVEL_BAD
+    if delay < CLEAR_DELAY:
+        return LEVEL_NORMAL
+    return None
+
+
+def notify(r, level, title, body, tags, traffic_text):
+    log.info("notify: %s - %s", title, traffic_text)
+    r.xadd("traffic_alerts", {"level": level, "title": title, "text": traffic_text})
+    try:
+        requests.post(NTFY_URL, data=body, headers={"Title": title, "Tags": tags}, timeout=10)
+    except requests.RequestException as e:
+        log.error("ntfy failed: %s", e)
+
+
+def main():
+    now = datetime.now(LONDON)
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+    # --- Fetch ---
+    gmaps = googlemaps.Client(key=API_KEY)
+    result = gmaps.distance_matrix(ORIGIN, DEST, departure_time="now")
+    element = result["rows"][0]["elements"][0]
+    if result["status"] != "OK" or element["status"] != "OK":
+        log.error("Google returned status %s / %s", result["status"], element["status"])
+        sys.exit(1)
+
+    duration = element["duration_in_traffic"]["value"]
+    traffic_text = element["duration_in_traffic"]["text"]
+    baseline = element["duration"]["value"]
+    distance = element["distance"]["value"]
+    delay = duration - baseline
+
+    # --- Record ---
+    reading = {"duration": duration, "baseline": baseline, "delay": delay,
+               "distance": distance, "day": now.weekday()}
+    r.xadd("traffic_stats", reading)
+
+    # --- Alert state machine ---
+    state = r.hgetall("traffic_alert")
+    level = int(state.get("level", LEVEL_NORMAL))
+    pending = int(state.get("pending", -1))
+    streak = int(state.get("streak", 0))
+
+    observed = classify(delay, distance)
+    log.info("duration %ss (%s) baseline %ss delay %ss distance %sm | level=%s observed=%s pending=%s streak=%s",
+             duration, traffic_text, baseline, delay, distance,
+             LEVEL_NAMES[level], LEVEL_NAMES.get(observed, "hold"), LEVEL_NAMES.get(pending, "-"), streak)
+
+    if observed is None:
+        pass  # in the hysteresis band: keep any pending change alive but don't advance it
+    elif observed == level:
+        pending, streak = -1, 0
+    else:
+        if observed == pending:
+            streak += 1
+        else:
+            pending, streak = observed, 1
+
+        if streak >= CONFIRM_RUNS:
+            previous, level = level, observed
+            pending, streak = -1, 0
+            if level == LEVEL_TERRIBLE:
+                notify(r, level, "Traffic is terrible",
+                       f"Heavy traffic means the A5 is no longer viable\nTravel time is currently: {traffic_text}",
+                       "rotating_light,construction", traffic_text)
+            elif level == LEVEL_BAD and previous < LEVEL_BAD:
+                notify(r, level, "Traffic is bad",
+                       f"Travel time is currently: {traffic_text}",
+                       "rotating_light", traffic_text)
+            elif level == LEVEL_NORMAL and NOTIFY_CLEAR:
+                notify(r, level, "Traffic is back to normal",
+                       f"Travel time is currently: {traffic_text}",
+                       "white_check_mark", traffic_text)
+            else:
+                log.info("level %s -> %s (silent)", LEVEL_NAMES[previous], LEVEL_NAMES[level])
+
+    pipe = r.pipeline()
+    pipe.hset("traffic_alert", mapping={"level": level, "pending": pending, "streak": streak})
+    pipe.expireat("traffic_alert", int(midnight_tonight(now).timestamp()))
+    pipe.hset("traffic_latest", mapping={**reading, "text": traffic_text, "level": level,
+                                         "updated": now.isoformat(timespec="seconds")})
+    pipe.execute()
+
+
+if __name__ == "__main__":
+    main()
